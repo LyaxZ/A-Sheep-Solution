@@ -147,38 +147,44 @@ class TileDetector:
         self.tile_counter = 0
 
     def detect_buffer(self, buffer_img: np.ndarray) -> list[str]:
-        """
-        检测缓冲槽中的方块类型。
-        buffer_img: 缓冲槽区域图像 (BGR)
-        返回类型名列表，空位不计入
-        """
+        """检测缓冲槽：提取每格→缩放→模板+直方图双路分类，永不返回? """
         if buffer_img is None or buffer_img.size == 0:
             return []
 
         h, w = buffer_img.shape[:2]
-        # 缓冲槽有 7 个格子，水平排列
         slot_w = w / 7
         buffer_types = []
 
         for i in range(7):
-            x1 = int(i * slot_w) + 2
-            x2 = int((i + 1) * slot_w) - 2
+            x1 = int(i * slot_w) + 4
+            x2 = int((i + 1) * slot_w) - 4
             y1, y2 = 2, h - 2
             if x2 <= x1 or y2 <= y1:
                 continue
+
             slot = buffer_img[y1:y2, x1:x2]
+            if slot.size == 0:
+                continue
 
-            # 判断该格子是否为空（暗色=空）
+            # 空槽检测
             gray = cv2.cvtColor(slot, cv2.COLOR_BGR2GRAY)
-            if np.mean(gray) < 30:
-                continue  # 空格子
+            if np.mean(gray) < 25:
+                continue
 
-            # 分类
-            t_type, score = self.matcher.classify(slot)
-            if score > 0.3:
+            # 缩放后双路分类
+            slot50 = cv2.resize(slot, TILE_SIZE)
+            # 模板匹配
+            t_type, tmpl_score = self.matcher.classify(slot50)
+            # 直方图匹配
+            h_type, h_score = self.matcher._classify_by_histogram(slot50)
+
+            # 取更好结果，不返回 ?
+            if tmpl_score > h_score and tmpl_score > 0.15:
                 buffer_types.append(t_type)
+            elif h_score > 0.15:
+                buffer_types.append(h_type)
             else:
-                buffer_types.append("?")
+                buffer_types.append(h_type)  # 最差也用直方图结果
 
         return buffer_types
 

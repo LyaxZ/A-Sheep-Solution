@@ -55,15 +55,9 @@ class SheepSolver:
         self.visited_states.clear()
         self.nodes_explored = 0
 
-        # 检查方块总数（仅警告，不阻止）
+        # 统计（不警告，分类不准是正常的）
         total_tiles = len(tiles)
         type_counts = Counter(t.tile_type for t in tiles)
-        if total_tiles % MATCH_COUNT != 0:
-            print(f"[solver] 警告: 总数 {total_tiles} 不是 {MATCH_COUNT} 的倍数")
-
-        for t_type, cnt in type_counts.items():
-            if cnt % MATCH_COUNT != 0:
-                print(f"[solver] 警告: 类型 [{t_type}] 数量 {cnt} 不是 {MATCH_COUNT} 的倍数")
 
         initial_state = GameState(
             tiles=list(tiles),

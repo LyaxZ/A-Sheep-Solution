@@ -19,12 +19,12 @@ WECHAT_WINDOW_TITLE = "羊了个羊：星球"
 
 # ---- 游戏区域比例（窗口内的比例位置，0~1）----
 GAME_BOARD_RATIO = (0.05, 0.22, 0.95, 0.67)    # 棋盘区域
-BUFFER_RATIO = (0.05, 0.67, 0.95, 0.76)          # 缓冲槽区域
+BUFFER_RATIO = (0.05, 0.67, 0.95, 0.72)          # 缓冲槽区域（棋盘正下方窄条）
 # 道具按钮（窗口底部3个蓝按钮）
 ITEMS_RATIO = {
-    "shuffle":   (0.05, 0.80, 0.30, 0.92),
-    "undo":      (0.33, 0.80, 0.58, 0.92),
-    "move_out":  (0.62, 0.80, 0.87, 0.92),
+    "shuffle":   (0.05, 0.75, 0.30, 0.90),
+    "undo":      (0.33, 0.75, 0.58, 0.90),
+    "move_out":  (0.62, 0.75, 0.87, 0.90),
 }
 REVIVE_RATIO = (0.25, 0.52, 0.75, 0.62)          # 复活弹窗按钮
 
@@ -36,7 +36,7 @@ ITEM_BLUE_HIGH   = (135, 255, 255)  # 道具蓝色 HSV 上限
 
 # ---- 方块参数 ----
 TILE_SIZE = (50, 50)
-TILE_MATCH_THRESHOLD = 0.45
+TILE_MATCH_THRESHOLD = 0.30
 
 # ---- 游戏规则 ----
 BUFFER_MAX = 7
@@ -73,11 +73,11 @@ class WindowInfo:
 
     @property
     def client_left(self) -> int:
-        return self.left + 8
+        return self.left  # 截图已包含整个窗口，无需偏移
 
     @property
     def client_top(self) -> int:
-        return self.top + 31
+        return self.top
 
     def ratio_to_region(self, ratio: tuple) -> tuple:
         """Ratio -> pixel region in window (x1,y1,x2,y2)"""
