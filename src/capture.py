@@ -1,5 +1,5 @@
 """
-屏幕截图模块 - 定位微信小程序窗口并截取游戏画面
+屏幕截图模块 - 比例坐标 + 颜色自动校准，适配任意窗口大小
 """
 
 import time
@@ -12,99 +12,97 @@ from mss import mss
 
 from config import (
     WECHAT_WINDOW_TITLE,
-    GAME_BOARD_REGION,
-    BUFFER_REGION,
+    GAME_BOARD_RATIO,
+    BUFFER_RATIO,
     SCREENSHOT_DIR,
+    WindowInfo,
+    auto_detect_regions,
+    apply_auto_regions,
 )
 
 
 def find_wechat_window() -> gw.Window | None:
-    """查找微信窗口"""
-    windows = gw.getWindowsWithTitle(WECHAT_WINDOW_TITLE)
-    if not windows:
-        return None
-    # 如果有多个，取第一个可见的
-    for win in windows:
+    """查找小程序窗口"""
+    for win in gw.getWindowsWithTitle(WECHAT_WINDOW_TITLE):
         if win.visible and win.width > 200 and win.height > 200:
             return win
-    return windows[0] if windows else None
+    return None
 
 
-def get_game_screenshot(win: gw.Window | None = None) -> np.ndarray | None:
-    """
-    截取微信窗口的完整截图
-    返回 BGR 格式的 numpy 数组
-    """
+def get_window_info(win: gw.Window | None = None) -> WindowInfo | None:
+    """获取窗口信息对象"""
     if win is None:
         win = find_wechat_window()
     if win is None:
-        print("[capture] 未找到微信窗口，请确保微信已打开且小程序在前台")
+        return None
+    return WindowInfo(win.left, win.top, win.width, win.height)
+
+
+def get_game_screenshot(win_info: WindowInfo | None = None) -> np.ndarray | None:
+    """截取小程序窗口完整截图，返回 BGR"""
+    if win_info is None:
+        win_info = get_window_info()
+    if win_info is None:
+        print("[capture] 未找到小程序窗口")
         return None
 
-    monitor = {
-        "left": win.left,
-        "top": win.top,
-        "width": win.width,
-        "height": win.height,
-    }
-
+    monitor = {"left": win_info.left, "top": win_info.top,
+               "width": win_info.width, "height": win_info.height}
     with mss() as sct:
         img = sct.grab(monitor)
-        # mss 返回 BGRA，转为 BGR
-        frame = np.array(img)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-        return frame
+        return cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
+
+
+def crop_region(frame: np.ndarray, ratio: tuple) -> np.ndarray:
+    """按比例裁剪区域"""
+    h, w = frame.shape[:2]
+    rx1, ry1, rx2, ry2 = ratio
+    x1, y1 = max(0, int(w * rx1)), max(0, int(h * ry1))
+    x2, y2 = min(w, int(w * rx2)), min(h, int(h * ry2))
+    return frame[y1:y2, x1:x2]
 
 
 def crop_game_board(frame: np.ndarray) -> np.ndarray:
-    """从完整截图中裁剪游戏棋盘区域"""
-    x1, y1, x2, y2 = GAME_BOARD_REGION
-    h, w = frame.shape[:2]
-    # 边界保护
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w, x2), min(h, y2)
-    return frame[y1:y2, x1:x2]
+    return crop_region(frame, GAME_BOARD_RATIO)
 
 
 def crop_buffer(frame: np.ndarray) -> np.ndarray:
-    """从完整截图中裁剪缓冲槽区域"""
-    x1, y1, x2, y2 = BUFFER_REGION
-    h, w = frame.shape[:2]
-    x1, y1 = max(0, x1), max(0, y1)
-    x2, y2 = min(w, x2), min(h, y2)
-    return frame[y1:y2, x1:x2]
-
-
-def get_window_client_offset(win: gw.Window) -> tuple[int, int]:
-    """
-    获取窗口客户区相对于窗口左上角的偏移
-    用于将客户区坐标转换为屏幕绝对坐标
-    """
-    # pygetwindow 给出的 left/top 是窗口外框位置
-    # 对于大多数 Windows 应用，客户区偏移约为 (8, 31)（标题栏+边框）
-    # 这里返回一个估计值，可后续校准
-    return (win.left + 8, win.top + 31)
+    return crop_region(frame, BUFFER_RATIO)
 
 
 def save_debug_screenshot(frame: np.ndarray, name: str = "debug"):
-    """保存调试截图"""
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     filename = SCREENSHOT_DIR / f"{name}_{ts}.png"
     cv2.imwrite(str(filename), frame)
-    print(f"[capture] 截图已保存: {filename}")
+    print(f"  [capture] 截图: {filename}")
     return filename
 
 
-if __name__ == "__main__":
-    # 测试：截图并保存
-    win = find_wechat_window()
-    if win:
-        print(f"找到窗口: {win.title}, 位置: ({win.left},{win.top}), 大小: ({win.width},{win.height})")
-        frame = get_game_screenshot(win)
-        if frame is not None:
-            save_debug_screenshot(frame, "full")
-            board = crop_game_board(frame)
-            save_debug_screenshot(board, "board")
-    else:
-        print("未找到微信窗口")
+def auto_calibrate() -> bool:
+    """自动校准：截图 → 颜色检测 → 更新全局比例。成功返回 True。"""
+    print("[calibrate] 自动校准中...")
+    win_info = get_window_info()
+    if win_info is None:
+        print("[calibrate] ✗ 未找到窗口")
+        return False
+
+    print(f"[calibrate] 窗口: {win_info.width}x{win_info.height}")
+
+    frame = get_game_screenshot(win_info)
+    if frame is None:
+        return False
+
+    detected = auto_detect_regions(frame)
+    if not detected or "board" not in detected:
+        print("[calibrate] ✗ 检测失败，用默认比例继续")
+        save_debug_screenshot(frame, "calibrate_failed")
+        return True
+
+    apply_auto_regions(detected)
+    print(f"[calibrate] ✓ 棋盘: {GAME_BOARD_RATIO}")
+    print(f"[calibrate] ✓ 缓冲: {BUFFER_RATIO}")
+
+    board = crop_game_board(frame)
+    save_debug_screenshot(board, "calibrate_board")
+    return True
