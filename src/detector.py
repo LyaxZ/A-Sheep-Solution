@@ -11,32 +11,31 @@ from config import (
     TEMPLATE_DIR,
     TILE_SIZE,
     TILE_MATCH_THRESHOLD,
-    TILE_TYPES,
 )
 
 
 # ---- 数据结构 ----
 
 class Tile:
-    """表示一个方块"""
-    __slots__ = ("id", "tile_type", "bbox", "center", "area", "free", "layer")
+    """表示一个方块，含可见比例"""
+    __slots__ = ("id", "tile_type", "bbox", "center", "area",
+                 "free", "layer", "visible_ratio", "match_score")
 
     def __init__(self, tile_id: int, tile_type: str, bbox: tuple, layer: int = 0):
-        """
-        bbox: (x, y, w, h) 方块边界框
-        """
         self.id = tile_id
         self.tile_type = tile_type
         self.bbox = bbox          # (x, y, w, h)
         x, y, w, h = bbox
         self.center = (x + w // 2, y + h // 2)
         self.area = w * h
-        self.free = True           # 是否可点击（不被上层方块压住）
-        self.layer = layer         # 所在层级（越大越靠上）
+        self.free = True
+        self.layer = layer
+        self.visible_ratio = 1.0
+        self.match_score = 0.0    # 模板匹配分（越高越完整→上层）
 
     def __repr__(self):
-        status = "✓" if self.free else "✗"
-        return f"Tile#{self.id}[{self.tile_type}]@({self.bbox[0]},{self.bbox[1]}){status}"
+        status = "OK" if self.free else "XX"
+        return f"Tile#{self.id}[{self.tile_type}]@({self.bbox[0]},{self.bbox[1]}) {self.visible_ratio:.0%}{status}"
 
     def to_dict(self):
         return {
@@ -85,21 +84,50 @@ class TemplateMatcher:
 
     def classify(self, tile_img: np.ndarray) -> tuple[str, float]:
         """
-        对单个方块图像进行分类
-        返回 (类型名, 置信度)
+        混合分类：模板匹配 + 直方图，取两者最高分。
         """
         best_type = "unknown"
-        best_score = 0.0
+        best_tmpl_score = 0.0
 
         tile_img = cv2.resize(tile_img, TILE_SIZE)
 
+        # 模板匹配
         for t_type, templates in self.templates.items():
             for tmpl in templates:
-                # 使用归一化互相关系数
                 result = cv2.matchTemplate(tile_img, tmpl, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, _ = cv2.minMaxLoc(result)
-                if max_val > best_score:
-                    best_score = max_val
+                if max_val > best_tmpl_score:
+                    best_tmpl_score = max_val
+                    best_type = t_type
+
+        # 直方图匹配
+        h_type, h_score = self._classify_by_histogram(tile_img)
+
+        # 取两者中高分（直方图对颜色敏感，模板对形状敏感）
+        if h_score > best_tmpl_score and h_score > 0.5:
+            return h_type, h_score
+
+        return best_type, best_tmpl_score
+
+    def _classify_by_histogram(self, tile_img: np.ndarray) -> tuple[str, float]:
+        """颜色直方图相似度匹配（回退方案）"""
+        hsv = cv2.cvtColor(tile_img, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
+        cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
+
+        best_type = "unknown"
+        best_score = 0.0
+
+        for t_type, templates in self.templates.items():
+            for tmpl in templates:
+                tmpl_hsv = cv2.cvtColor(tmpl, cv2.COLOR_BGR2HSV)
+                tmpl_hist = cv2.calcHist([tmpl_hsv], [0, 1], None,
+                                          [32, 32], [0, 180, 0, 256])
+                cv2.normalize(tmpl_hist, tmpl_hist, 0, 1, cv2.NORM_MINMAX)
+
+                score = cv2.compareHist(hist, tmpl_hist, cv2.HISTCMP_CORREL)
+                if score > best_score:
+                    best_score = score
                     best_type = t_type
 
         return best_type, best_score
@@ -112,12 +140,47 @@ class TemplateMatcher:
 # ---- 方块检测器 ----
 
 class TileDetector:
-    """检测棋盘上的所有方块"""
+    """检测棋盘上的所有方块 + 缓冲槽"""
 
     def __init__(self):
         self.matcher = TemplateMatcher()
         self.tile_counter = 0
-        self.expected_tile_area = TILE_SIZE[0] * TILE_SIZE[1]
+
+    def detect_buffer(self, buffer_img: np.ndarray) -> list[str]:
+        """
+        检测缓冲槽中的方块类型。
+        buffer_img: 缓冲槽区域图像 (BGR)
+        返回类型名列表，空位不计入
+        """
+        if buffer_img is None or buffer_img.size == 0:
+            return []
+
+        h, w = buffer_img.shape[:2]
+        # 缓冲槽有 7 个格子，水平排列
+        slot_w = w / 7
+        buffer_types = []
+
+        for i in range(7):
+            x1 = int(i * slot_w) + 2
+            x2 = int((i + 1) * slot_w) - 2
+            y1, y2 = 2, h - 2
+            if x2 <= x1 or y2 <= y1:
+                continue
+            slot = buffer_img[y1:y2, x1:x2]
+
+            # 判断该格子是否为空（暗色=空）
+            gray = cv2.cvtColor(slot, cv2.COLOR_BGR2GRAY)
+            if np.mean(gray) < 30:
+                continue  # 空格子
+
+            # 分类
+            t_type, score = self.matcher.classify(slot)
+            if score > 0.3:
+                buffer_types.append(t_type)
+            else:
+                buffer_types.append("?")
+
+        return buffer_types
 
     def detect(self, board_img: np.ndarray) -> list[Tile]:
         """
@@ -136,72 +199,176 @@ class TileDetector:
         print(f"[detector] 检测到 {len(candidates)} 个候选方块")
 
         # 步骤2：对每个候选方块进行模板匹配分类
+        best_scores = []  # debug
         for bbox in candidates:
             x, y, w, h = bbox
-            # 提取方块中心区域（图标部分，缩小以避免边框干扰）
-            margin = max(4, w // 8)
-            icon_region = board_img[y + margin:y + h - margin,
-                                    x + margin:x + w - margin]
+            # 提取方块图像（留微小边距去噪）
+            # 提取完整方块区域（模板已是干净图标，不需裁剪边距）
+            icon_region = board_img[y:y + h, x:x + w]
 
             if icon_region.size == 0:
                 continue
 
             tile_type, score = self.matcher.classify(icon_region)
+            best_scores.append(score)
 
             if score >= TILE_MATCH_THRESHOLD or self.matcher.type_names == []:
-                # 如果没有模板，全部标记为 unknown
                 if not self.matcher.type_names:
                     tile_type = "unknown"
                 tile = Tile(self.tile_counter, tile_type, bbox)
+                tile.match_score = score
                 tiles.append(tile)
                 self.tile_counter += 1
 
+        if best_scores:
+            top5 = sorted(best_scores, reverse=True)[:5]
+            print(f"[detector] 最高匹配分: {[f'{s:.3f}' for s in top5]} (阈值={TILE_MATCH_THRESHOLD})")
+
         print(f"[detector] 成功分类 {len(tiles)} 个方块")
 
-        # 步骤3：计算层级并判断可点击性
-        self._compute_layers(tiles)
+        # 步骤3：亮度法判断可点击性
+        self._compute_layers(tiles, board_img)
 
         return tiles
 
     def _find_tile_candidates(self, board_img: np.ndarray) -> list[tuple]:
         """
-        查找所有方块的候选边界框
-        使用边缘检测 + 轮廓查找
+        混合检测：模板匹配 + 背景扣除，两路并进不漏方块
         """
-        gray = cv2.cvtColor(board_img, cv2.COLOR_BGR2GRAY)
+        # 方法1: 全图滑窗模板匹配
+        candidates = self._match_templates_full(board_img)
 
-        # 高斯模糊降噪
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        # 方法2: 背景扣除（捕获模板匹配漏掉的方块）
+        bg_candidates = self._find_by_background(board_img)
 
-        # Canny 边缘检测
-        edges = cv2.Canny(blurred, 30, 100)
+        # 合并
+        all_candidates = candidates + bg_candidates
+        if not all_candidates:
+            return []
 
-        # 膨胀连接断边
-        kernel = np.ones((3, 3), np.uint8)
-        edges = cv2.dilate(edges, kernel, iterations=1)
+        # 去重
+        merged = self._nms(all_candidates, iou_threshold=0.3)
+        print(f"[detector] 混合检测: {len(merged)} 个候选 "
+              f"(模板:{len(candidates)} 背景:{len(bg_candidates)})")
+        return merged
+
+    def _match_templates_full(self, board_img: np.ndarray) -> list[tuple]:
+        """全图滑窗模板匹配"""
+        candidates = []
+        h, w = board_img.shape[:2]
+        tw, th = TILE_SIZE
+        scales = [0.80, 0.90, 1.0, 1.10]
+
+        for t_type, templates in self.matcher.templates.items():
+            for tmpl in templates:
+                for scale in scales:
+                    sw, sh = int(tw * scale), int(th * scale)
+                    if sw > w or sh > h or sw < 10 or sh < 10:
+                        continue
+                    scaled_tmpl = cv2.resize(tmpl, (sw, sh))
+                    try:
+                        result = cv2.matchTemplate(board_img, scaled_tmpl,
+                                                    cv2.TM_CCOEFF_NORMED)
+                    except cv2.error:
+                        continue
+
+                    locations = np.where(result >= 0.45)
+                    for pt in zip(*locations[::-1]):
+                        candidates.append((pt[0], pt[1], sw, sh))
+
+        return self._nms(candidates, iou_threshold=0.25)
+
+    def _find_by_background(self, board_img: np.ndarray) -> list[tuple]:
+        """回退：背景扣除法"""
+        hsv = cv2.cvtColor(board_img, cv2.COLOR_BGR2HSV)
+
+        # 尝试多个绿色范围，适配不同光照/纹理
+        green_ranges = [
+            ((25, 25, 30), (100, 255, 255)),   # 宽青绿
+            ((30, 30, 40), (90, 255, 240)),     # 标准绿
+            ((35, 20, 20), (85, 255, 255)),     # 深绿
+        ]
+
+        bg_mask = None
+        for low, high in green_ranges:
+            mask = cv2.inRange(hsv, low, high)
+            if cv2.countNonZero(mask) > board_img.size * 0.05:
+                bg_mask = mask
+                break
+
+        if bg_mask is None:
+            return []
+
+        # 形态学闭运算：填补绿色区域小孔
+        kernel = np.ones((5, 5), np.uint8)
+        bg_mask = cv2.morphologyEx(bg_mask, cv2.MORPH_CLOSE, kernel)
+
+        # 取反：非绿色区域 = 方块
+        tile_mask = cv2.bitwise_not(bg_mask)
+
+        # 开运算去噪
+        tile_mask = cv2.morphologyEx(tile_mask, cv2.MORPH_OPEN,
+                                      np.ones((3, 3), np.uint8))
 
         # 查找轮廓
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+        contours, _ = cv2.findContours(tile_mask, cv2.RETR_EXTERNAL,
                                         cv2.CHAIN_APPROX_SIMPLE)
 
         candidates = []
-        min_area = self.expected_tile_area * 0.25   # 最小面积（考虑遮挡）
-        max_area = self.expected_tile_area * 1.8
+        img_area = board_img.shape[0] * board_img.shape[1]
+        min_area = img_area * 0.00008   # 更小，捕获被遮挡方块
+        max_area = img_area * 0.08
 
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             area = w * h
 
-            # 面积过滤
             if min_area <= area <= max_area:
-                # 宽高比过滤（方块接近正方形，容忍一定变形）
                 aspect = w / h if h > 0 else 0
-                if 0.5 <= aspect <= 2.0:
+                if 0.4 <= aspect <= 2.5:
                     candidates.append((x, y, w, h))
 
-        # 合并重叠度过高的候选框（去重）
         candidates = self._merge_overlapping(candidates)
         return candidates
+
+    def _nms(self, boxes: list[tuple], iou_threshold: float = 0.3) -> list[tuple]:
+        """非极大值抑制，去重重叠框"""
+        if len(boxes) <= 1:
+            return boxes
+        boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)
+        keep = []
+        for box in boxes:
+            ok = True
+            for kept in keep:
+                if self._compute_iou(box, kept) > iou_threshold:
+                    ok = False
+                    break
+            if ok:
+                keep.append(box)
+        return keep
+
+    def _find_by_background(self, board_img: np.ndarray) -> list[tuple]:
+        """回退：背景扣除法"""
+        gray = cv2.cvtColor(board_img, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blurred, 20, 80)
+        edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        img_area = board_img.shape[0] * board_img.shape[1]
+        min_area = img_area * 0.0002
+        max_area = img_area * 0.06
+
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            area = w * h
+            if min_area <= area <= max_area:
+                aspect = w / h if h > 0 else 0
+                if 0.4 <= aspect <= 2.5:
+                    candidates.append((x, y, w, h))
+
+        return self._merge_overlapping(candidates)
 
     def _merge_overlapping(self, boxes: list[tuple],
                             iou_threshold: float = 0.6) -> list[tuple]:
@@ -242,38 +409,49 @@ class TileDetector:
 
         return inter_area / union_area if union_area > 0 else 0
 
-    def _compute_layers(self, tiles: list[Tile]):
+    def _compute_layers(self, tiles: list[Tile], board_img=None):
         """
-        计算每个方块的层级和可点击性
-        规则：如果方块 A 的中心点落在方块 B 的区域内，且 B 面积更大，
-        则 B 在 A 上层，A 被 B 遮挡，A 不可点击
+        亮度法判断可点击：上层亮、下层暗。Otsu 自动阈值分割。
         """
         if not tiles:
             return
 
-        n = len(tiles)
+        if board_img is None:
+            for t in tiles:
+                t.free = True; t.layer = 0
+            return
 
-        # 按面积排序计算层级：面积越大越靠上（上层方块更完整）
-        sorted_tiles = sorted(tiles, key=lambda t: t.area, reverse=True)
-        for i, tile in enumerate(sorted_tiles):
-            tile.layer = n - i  # 层级越高越靠上
+        gray = cv2.cvtColor(board_img, cv2.COLOR_BGR2GRAY)
+        brightnesses = []
 
-        # 判断每个方块是否被其他方块遮挡
         for tile in tiles:
-            cx, cy = tile.center
-            for other in tiles:
-                if other.id == tile.id:
-                    continue
-                ox, oy, ow, oh = other.bbox
-                # 检查 tile 的中心是否在 other 的区域内
-                if (ox <= cx <= ox + ow) and (oy <= cy <= oy + oh):
-                    # other 在 tile 上层 → tile 被遮挡
-                    if other.layer > tile.layer:
-                        tile.free = False
-                        break
+            x, y, w, h = tile.bbox
+            margin_x, margin_y = int(w * 0.2), int(h * 0.2)
+            cx1 = max(0, x + margin_x)
+            cy1 = max(0, y + margin_y)
+            cx2 = min(gray.shape[1], x + w - margin_x)
+            cy2 = min(gray.shape[0], y + h - margin_y)
+            if cx2 > cx1 and cy2 > cy1:
+                b = float(np.mean(gray[cy1:cy2, cx1:cx2]))
+            else:
+                b = 128.0
+            brightnesses.append(b)
 
-        free_count = sum(1 for t in tiles if t.free)
-        print(f"[detector] 可点击方块: {free_count}/{len(tiles)}")
+        if len(brightnesses) < 2:
+            for t in tiles:
+                t.free = True
+            return
+
+        arr = np.array(brightnesses, dtype=np.uint8)
+        thresh, _ = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        for tile, b in zip(tiles, brightnesses):
+            tile.free = b > thresh
+
+        free_n = sum(1 for t in tiles if t.free)
+        blocked_n = len(tiles) - free_n
+        print(f"[detector] 亮度Otsu阈值={thresh} 可点击={free_n} 被挡={blocked_n} "
+              f"亮度=[{min(brightnesses):.0f},{max(brightnesses):.0f}]")
 
 
 # ---- 辅助函数 ----

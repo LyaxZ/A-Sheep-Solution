@@ -39,7 +39,8 @@ def get_window_info(win: gw.Window | None = None) -> WindowInfo | None:
 
 
 def get_game_screenshot(win_info: WindowInfo | None = None) -> np.ndarray | None:
-    """截取小程序窗口完整截图，返回 BGR"""
+    """截取小程序窗口完整截图，返回 BGR。
+    同时修正 win_info 的宽高为截图实际尺寸（处理 DPI 缩放）"""
     if win_info is None:
         win_info = get_window_info()
     if win_info is None:
@@ -50,7 +51,16 @@ def get_game_screenshot(win_info: WindowInfo | None = None) -> np.ndarray | None
                "width": win_info.width, "height": win_info.height}
     with mss() as sct:
         img = sct.grab(monitor)
-        return cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
+
+    # 用截图实际尺寸修正 win_info（处理 DPI 缩放差异）
+    h, w = frame.shape[:2]
+    if w != win_info.width or h != win_info.height:
+        print(f"  [capture] DPI缩放: 窗口{win_info.width}x{win_info.height} → 截图{w}x{h}")
+        win_info.width = w
+        win_info.height = h
+
+    return frame
 
 
 def crop_region(frame: np.ndarray, ratio: tuple) -> np.ndarray:
@@ -84,7 +94,7 @@ def auto_calibrate() -> bool:
     print("[calibrate] 自动校准中...")
     win_info = get_window_info()
     if win_info is None:
-        print("[calibrate] ✗ 未找到窗口")
+        print(f"[calibrate] FAIL: window not found")
         return False
 
     print(f"[calibrate] 窗口: {win_info.width}x{win_info.height}")
@@ -95,13 +105,16 @@ def auto_calibrate() -> bool:
 
     detected = auto_detect_regions(frame)
     if not detected or "board" not in detected:
-        print("[calibrate] ✗ 检测失败，用默认比例继续")
+        print("[calibrate] FAIL: using default ratios")
         save_debug_screenshot(frame, "calibrate_failed")
+        # 也保存当前裁剪的棋盘，方便检查
+        board = crop_game_board(frame)
+        save_debug_screenshot(board, "calibrate_board_default")
         return True
 
     apply_auto_regions(detected)
-    print(f"[calibrate] ✓ 棋盘: {GAME_BOARD_RATIO}")
-    print(f"[calibrate] ✓ 缓冲: {BUFFER_RATIO}")
+    print(f"[calibrate] OK board: {GAME_BOARD_RATIO}")
+    print(f"[calibrate] OK buffer: {BUFFER_RATIO}")
 
     board = crop_game_board(frame)
     save_debug_screenshot(board, "calibrate_board")

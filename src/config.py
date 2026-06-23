@@ -29,14 +29,14 @@ ITEMS_RATIO = {
 REVIVE_RATIO = (0.25, 0.52, 0.75, 0.62)          # 复活弹窗按钮
 
 # ---- 颜色阈值（自动检测用）----
-BOARD_GREEN_LOW  = (30, 40, 40)     # 棋盘绿色 HSV 下限
-BOARD_GREEN_HIGH = (85, 255, 255)   # 棋盘绿色 HSV 上限
-ITEM_BLUE_LOW    = (90, 50, 50)     # 道具蓝色 HSV 下限
-ITEM_BLUE_HIGH   = (130, 255, 255)  # 道具蓝色 HSV 上限
+BOARD_GREEN_LOW  = (25, 25, 30)     # 棋盘绿色 HSV 下限 (放宽青绿色)
+BOARD_GREEN_HIGH = (100, 255, 255)  # 棋盘绿色 HSV 上限
+ITEM_BLUE_LOW    = (90, 40, 30)     # 道具蓝色 HSV 下限
+ITEM_BLUE_HIGH   = (135, 255, 255)  # 道具蓝色 HSV 上限
 
 # ---- 方块参数 ----
 TILE_SIZE = (50, 50)
-TILE_MATCH_THRESHOLD = 0.70
+TILE_MATCH_THRESHOLD = 0.45
 
 # ---- 游戏规则 ----
 BUFFER_MAX = 7
@@ -65,7 +65,7 @@ ITEMS = {
 
 @dataclass
 class WindowInfo:
-    """窗口大小/位置 + 比例→像素坐标转换"""
+    """Window size/position + ratio-to-pixel conversion"""
     left: int = 0
     top: int = 0
     width: int = 0
@@ -80,13 +80,13 @@ class WindowInfo:
         return self.top + 31
 
     def ratio_to_region(self, ratio: tuple) -> tuple:
-        """比例 → 窗口内像素区域 (x1,y1,x2,y2)"""
+        """Ratio -> pixel region in window (x1,y1,x2,y2)"""
         rx1, ry1, rx2, ry2 = ratio
         return (int(self.width * rx1), int(self.height * ry1),
                 int(self.width * rx2), int(self.height * ry2))
 
     def ratio_to_screen_center(self, ratio: tuple) -> tuple:
-        """比例 → 屏幕绝对坐标 (cx, cy)"""
+        """Ratio -> absolute screen coordinates (cx, cy)"""
         px1, py1, px2, py2 = self.ratio_to_region(ratio)
         return (self.client_left + (px1 + px2) // 2,
                 self.client_top + (py1 + py2) // 2)

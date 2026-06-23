@@ -1,40 +1,33 @@
 """
 羊了个羊 自动通关 - 主入口
 用法:
-  python src/main.py             正常运行（自动校准+开跑）
-  python src/main.py --debug     调试：截图+检测方块，不点击
+  python src/main.py             正常运行
+  python src/main.py --debug     调试：截图+检测，不点击
 """
 
 import time
 import signal
 import sys
+import argparse
 
 from capture import (
     find_wechat_window,
     get_game_screenshot,
     get_window_info,
     crop_game_board,
+    crop_buffer,
     save_debug_screenshot,
     auto_calibrate,
 )
 from detector import TileDetector, get_free_tiles
-from solver import SheepSolver, format_solution
+from solver import SheepSolver
 from executor import ClickExecutor, user_item_prompt
 from config import WECHAT_WINDOW_TITLE
 
 running = True
 
 
-def signal_handler(sig, frame):
-    global running
-    print("\n⏹ 中断信号，退出...")
-    running = False
-
-signal.signal(signal.SIGINT, signal_handler)
-
-
 class SheepAutoPlayer:
-    """羊了个羊自动通关"""
 
     def __init__(self):
         self.detector = TileDetector()
@@ -43,47 +36,33 @@ class SheepAutoPlayer:
         self.stats = {"rounds": 0, "moves": 0, "items_used": 0}
 
     def setup(self) -> bool:
-        """初始化 + 自动校准"""
-        global running
+        print("=" * 50)
+        print("Sheep Auto Solver")
+        print("=" * 50)
 
-        print("=" * 55)
-        print("🐑 羊了个羊 自动通关")
-        print("=" * 55)
-
-        # 查找窗口
         win = find_wechat_window()
         if win is None:
-            print(f"\n❌ 未找到小程序窗口 [{WECHAT_WINDOW_TITLE}]")
-            print("请确保小程序已打开并进入游戏关卡")
+            print(f"[!] Window not found: {WECHAT_WINDOW_TITLE}")
+            print("    Make sure the mini-program is open and in a game level")
             return False
 
-        print(f"✅ 窗口: {win.width}x{win.height}")
+        print(f"[*] Window: {win.width}x{win.height}")
 
-        # 自动校准区域
         if not auto_calibrate():
-            print("⚠ 自动校准失败，使用默认比例")
+            print("[!] Auto-calibrate failed, using default ratios")
 
-        # 初始化执行器
         if not self.executor.calibrate():
             return False
 
-        # 检查模板
         type_count = len(self.detector.matcher.type_names)
         if type_count == 0:
-            print("\n⚠ 未找到方块模板！")
-            print(f"  请将方块图标截图放到: data/templates/")
-            print(f"  命名随意 (如 1.png 2.png ...)")
-            print(f"  每种图标截一张即可，约 10-15 张")
+            print("[!] No tile templates found!")
+            print(f"    Put tile icon PNGs into: data/templates/")
+            print(f"    Name them anything (e.g. 1.png 2.png ...)")
             return False
 
-        print(f"📦 模板: {type_count} 种")
-
-        if not running:
-            return False
-
-        print("\n" + "=" * 55)
-        print("3 秒后自动开始，Ctrl+C 停止")
-        print("=" * 55)
+        print(f"[*] Templates: {type_count} types")
+        print("\nStarting in 3 seconds... Ctrl+C to stop")
         time.sleep(3)
         return True
 
@@ -94,25 +73,23 @@ class SheepAutoPlayer:
 
         while running:
             self.stats["rounds"] += 1
-            print(f"\n{'─'*40}")
-            print(f"🎮 第 {self.stats['rounds']} 局")
-            print(f"{'─'*40}")
+            print(f"\n{'='*40}")
+            print(f"Round {self.stats['rounds']}")
+            print(f"{'='*40}")
             time.sleep(1.0)
 
-            success = self._play_one_round()
-            if success:
-                print("\n🎉 通关！")
+            if self._play_one_round():
+                print("\n*** CLEARED! ***")
                 break
 
-            print("\n💀 本局失败")
+            print("\nRound failed")
             if not running:
                 break
 
-            c = input("\n重试? (y/n): ").strip().lower()
+            c = input("\nRetry? (y/n): ").strip().lower()
             if c != "y":
                 break
-
-            print("重新开始...")
+            print("Restarting...")
             self.executor.click_restart()
             time.sleep(2.0)
 
@@ -120,44 +97,62 @@ class SheepAutoPlayer:
 
     def _play_one_round(self) -> bool:
         global running
-        max_loops = 200
         revive_used = False
         self.solver.revive_used = False
 
-        for loop in range(max_loops):
+        for loop in range(200):
             if not running:
                 return False
 
-            print(f"\n--- 轮次 {loop + 1} ---")
+            print(f"\n-- Step {loop + 1} --")
 
-            # 截图
-            win_info = get_window_info()
-            frame = get_game_screenshot(win_info)
+            frame = get_game_screenshot()
             if frame is None:
                 return False
             board = crop_game_board(frame)
+            buf_img = crop_buffer(frame)
 
-            # 识别
+            # 检测棋盘
             tiles = self.detector.detect(board)
             if not tiles:
-                print("未检测到方块")
+                print("No tiles detected")
                 return False
 
+            # 检测缓冲槽
+            buffer_types = self.detector.detect_buffer(buf_img)
+            from collections import Counter as _Ct
+            buf_counts = _Ct(buffer_types)
+            can_complete = [t for t, c in buf_counts.items() if c >= 2]
+            buf_disp = " ".join(buffer_types) if buffer_types else "(empty)"
+            if can_complete:
+                buf_disp += f" [need 1 more: {can_complete}]"
+
             free_n = sum(1 for t in tiles if t.free)
-            print(f"棋盘: {len(tiles)} 方块, {free_n} 可点击")
+            print(f"Board: {len(tiles)} tiles, {free_n} free | Buffer[{len(buffer_types)}]: {buf_disp}")
 
             # 求解
-            result = self.solver.solve(tiles)
+            result = self.solver.solve(tiles, buffer_types)
 
             if result.success:
-                print(f"✅ 路径 {len(result.moves)} 步")
-                self._execute_moves(result.moves)
+                print(f"* Solution: {len(result.moves)} moves")
+                executed = 0
+                for tile_id, tile_type in result.moves[:8]:
+                    if not running: break
+                    for t in tiles:
+                        if t.tile_type == tile_type and t.free:
+                            self.executor.click_tile(t.bbox)
+                            self.stats["moves"] += 1
+                            executed += 1
+                            t.free = False
+                            time.sleep(0.12)
+                            break
+                if executed > 0:
+                    print(f"  -> clicked {executed}")
+                time.sleep(0.3)
                 continue
 
-            # 求解失败 → 道具
-            print(f"❌ {result.message}")
-            buffer_full = "死胡同" in result.message or "缓冲" in result.message
-
+            print(f"! {result.message}")
+            buffer_full = len(buffer_types) >= 7
             item_key = user_item_prompt(
                 result.recommended_item,
                 revive_used=revive_used,
@@ -165,57 +160,61 @@ class SheepAutoPlayer:
             )
 
             if item_key == "quit":
-                running = False
-                return False
-
+                running = False; return False
             if item_key is None:
-                # 跳过道具，贪心走一步
                 free_tiles = get_free_tiles(tiles)
                 if free_tiles:
-                    best = max(free_tiles, key=lambda t: t.layer)
-                    self.executor.click_tile(best.bbox)
-                    self.stats["moves"] += 1
+                    best = self._best_greedy_move(free_tiles, buffer_types)
+                    if best:
+                        self.executor.click_tile(best.bbox)
+                        self.stats["moves"] += 1
                 continue
 
-            # 使用道具
             if item_key == "revive":
                 revive_used = True
                 self.solver.revive_used = True
-                print("💀 复活 (槽满移除左侧3个)")
-
             self.executor.click_item(item_key)
             self.stats["items_used"] += 1
             time.sleep(1.5)
 
-        print(f"\n⚠ 超过最大循环 ({max_loops})")
         return False
 
-    def _execute_moves(self, moves: list):
-        for i, (tile_id, tile_type) in enumerate(moves):
-            if not running:
-                return
-            self.stats["moves"] += 1
-        time.sleep(0.5)
+    def _best_greedy_move(self, free_tiles, buffer_types: list):
+        """贪心：优先三连 > 缓冲已有 > 释放上层"""
+        from collections import Counter
+        counts = Counter(buffer_types)
+        for t in free_tiles:
+            if counts.get(t.tile_type, 0) >= 2:
+                return t
+        for t in free_tiles:
+            if counts.get(t.tile_type, 0) >= 1:
+                return t
+        return max(free_tiles, key=lambda t: t.match_score) if free_tiles else None
 
     def _print_stats(self):
         print(f"\n{'='*40}")
-        print(f"📊 总局: {self.stats['rounds']}  点击: {self.stats['moves']}  道具: {self.stats['items_used']}")
+        print(f"Rounds: {self.stats['rounds']}  Clicks: {self.stats['moves']}  Items: {self.stats['items_used']}")
         print(f"{'='*40}")
 
 
-# ---- 主入口 ----
-
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="羊了个羊自动通关")
-    parser.add_argument("--debug", action="store_true", help="截图+检测方块，不点击")
+    global running
+
+    def handler(sig, frame):
+        global running
+        print("\nInterrupted, exiting...")
+        running = False
+
+    signal.signal(signal.SIGINT, handler)
+
+    parser = argparse.ArgumentParser(description="Sheep Auto Solver")
+    parser.add_argument("--debug", action="store_true", help="Screenshot + detect only")
     args = parser.parse_args()
 
     if args.debug:
-        from capture import find_wechat_window, get_game_screenshot, crop_game_board, save_debug_screenshot
         win = find_wechat_window()
         if not win:
-            print(f"❌ 未找到窗口 [{WECHAT_WINDOW_TITLE}]")
+            print(f"[!] Window not found: {WECHAT_WINDOW_TITLE}")
             return
         frame = get_game_screenshot()
         if frame is not None:
@@ -224,8 +223,8 @@ def main():
             save_debug_screenshot(board, "debug_board")
             detector = TileDetector()
             tiles = detector.detect(board)
-            print(f"\n检测: {len(tiles)} 方块")
-            for t in tiles[:25]:
+            print(f"\nDetected: {len(tiles)} tiles")
+            for t in tiles[:30]:
                 print(f"  {t}")
     else:
         player = SheepAutoPlayer()

@@ -14,6 +14,7 @@ from config import (
     WECHAT_WINDOW_TITLE,
     WindowInfo,
 )
+from capture import get_game_screenshot
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.03
@@ -27,14 +28,17 @@ class ClickExecutor:
         self.click_delay = (0.06, 0.12)
 
     def calibrate(self) -> bool:
-        """定位窗口，返回是否成功"""
+        """定位窗口并修正 DPI 缩放"""
         for w in gw.getWindowsWithTitle(WECHAT_WINDOW_TITLE):
             if w.visible and w.width > 200 and w.height > 200:
                 self.win_info = WindowInfo(w.left, w.top, w.width, w.height)
-                print(f"[executor] 窗口: {w.width}x{w.height} @({w.left},{w.top})")
+                # 通过截图获取真实尺寸（处理 DPI 缩放）
+                _ = get_game_screenshot(self.win_info)
+                print(f"[executor] 窗口: {self.win_info.width}x{self.win_info.height}"
+                      f" @({self.win_info.left},{self.win_info.top})")
                 return True
 
-        print(f"[executor] ✗ 未找到窗口 [{WECHAT_WINDOW_TITLE}]")
+        print(f"[executor] FAIL: window [{WECHAT_WINDOW_TITLE}] not found")
         return False
 
     def click_tile(self, tile_bbox: tuple):
@@ -82,18 +86,18 @@ def user_item_prompt(recommended_key: str | None,
         item = ITEMS.get(recommended_key)
         desc = f"{item.name} - {item.description}" if item else recommended_key
         prompt = (f"\n{'='*50}\n"
-                  f"⚠ 自动求解失败，推荐: [{recommended_key}] {desc}\n\n"
+                  f"[!] Solver failed, recommend: [{recommended_key}] {desc}\n\n"
                   f"可选道具:\n")
     else:
         prompt = (f"\n{'='*50}\n"
-                  f"⚠ 自动求解失败\n可选道具:\n")
+                  f"[!] Solver failed\nItems:\n")
 
     for key, item in ITEMS.items():
         if key == "revive":
             if revive_used:
                 prompt += f"  [{key}] {item.name} (已用)\n"
             elif buffer_full:
-                prompt += f"  [{key}] {item.name} ← 唯一可用!\n"
+                prompt += f"  [{key}] {item.name} <-- only available!\n"
         elif buffer_full:
             prompt += f"  [{key}] {item.name} (槽满不可用)\n"
         else:

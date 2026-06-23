@@ -46,32 +46,30 @@ class SheepSolver:
         self.nodes_explored = 0
         self.revive_used = False            # 本局是否已使用复活
 
-    def solve(self, tiles: list) -> SolverResult:
+    def solve(self, tiles: list, buffer_types: list[str] | None = None) -> SolverResult:
         """
-        主求解入口
-        tiles: 当前棋盘上的所有方块列表
+        主求解入口。
+        tiles: 当前棋盘上的所有方块
+        buffer_types: 缓冲槽中已有的类型（从截图检测），None=假设空
         """
         self.visited_states.clear()
         self.nodes_explored = 0
 
-        # 检查方块总数是否为 3 的倍数
+        # 检查方块总数（仅警告，不阻止）
         total_tiles = len(tiles)
-        if total_tiles % MATCH_COUNT != 0:
-            return SolverResult(
-                success=False,
-                message=f"方块总数 {total_tiles} 不是 {MATCH_COUNT} 的倍数，可能检测有误"
-            )
-
-        # 统计每种类型的数量是否都是 3 的倍数
         type_counts = Counter(t.tile_type for t in tiles)
+        if total_tiles % MATCH_COUNT != 0:
+            print(f"[solver] 警告: 总数 {total_tiles} 不是 {MATCH_COUNT} 的倍数")
+
         for t_type, cnt in type_counts.items():
             if cnt % MATCH_COUNT != 0:
-                return SolverResult(
-                    success=False,
-                    message=f"类型 [{t_type}] 数量 {cnt} 不是 {MATCH_COUNT} 的倍数，可能分类有误"
-                )
+                print(f"[solver] 警告: 类型 [{t_type}] 数量 {cnt} 不是 {MATCH_COUNT} 的倍数")
 
-        initial_state = GameState(tiles=list(tiles), buffer=[], move_history=[])
+        initial_state = GameState(
+            tiles=list(tiles),
+            buffer=list(buffer_types) if buffer_types else [],
+            move_history=[],
+        )
 
         print(f"[solver] 开始求解: {total_tiles} 个方块, "
               f"{sum(1 for t in tiles if t.free)} 个可点击, "
@@ -213,30 +211,24 @@ class SheepSolver:
                 state.buffer = new_buffer
 
     def _update_free_status(self, tiles: list):
-        """重新计算所有方块的可点击状态"""
+        """重叠>5% + 匹配分高者在上层"""
         if not tiles:
             return
-
-        # 先全部设为可点击
-        for t in tiles:
-            t.free = True
-
-        # 按层排序
-        layers = sorted(set(t.layer for t in tiles), reverse=True)
-        if not layers:
-            return
-
-        # 从上层到下检查遮挡
         for tile in tiles:
-            cx, cy = tile.center
+            tile.free = True
+            ax, ay, aw, ah = tile.bbox
             for other in tiles:
-                if other.id == tile.id:
-                    continue
+                if other.id == tile.id: continue
                 ox, oy, ow, oh = other.bbox
-                if (ox <= cx <= ox + ow) and (oy <= cy <= oy + oh):
-                    if other.layer > tile.layer:
-                        tile.free = False
-                        break
+                ix1, iy1 = max(ax, ox), max(ay, oy)
+                ix2, iy2 = min(ax + aw, ox + ow), min(ay + ah, oy + oh)
+                if ix1 < ix2 and iy1 < iy2:
+                    inter = (ix2 - ix1) * (iy2 - iy1)
+                    if inter > min(tile.area, other.area) * 0.05:
+                        ms1 = getattr(tile, 'match_score', 0)
+                        ms2 = getattr(other, 'match_score', 0)
+                        if ms2 > ms1 + 0.05:
+                            tile.free = False; break
 
     def _is_dead_end(self, state: GameState) -> bool:
         """
